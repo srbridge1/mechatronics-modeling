@@ -6,7 +6,7 @@ from matplotlib.animation import FuncAnimation
 state_time = 0.0
 
 # =========================
-# World configuration
+# World configuration: size the screen
 # =========================
 WORLD_X_MIN = 0.0
 WORLD_X_MAX = 12.0
@@ -14,7 +14,7 @@ WORLD_Y_MIN = 0.0
 WORLD_Y_MAX = 8.0
 
 # =========================
-# Sonar configuration
+# Sonar configuration: sonar behavior information
 # =========================
 SONAR_FOV_DEG = 40.0
 SONAR_NUM_RAYS = 21
@@ -24,20 +24,28 @@ SONAR_HZ = 40
 DT = 1.0 / SONAR_HZ
 
 # =========================
-# Canyon / walls
+# Canyon / walls (original detailed set): mapping the wall for canyon navigation
 # =========================
 WALLS = [
+    LineString([(4.0, 6.0), (5.0, 6.0), (5.0, 6.05), (4.0, 6.05)]),
     LineString([(5.0, 6.0), (6.0, 6.0), (6.0, 6.05), (5.0, 6.05)]),
+    LineString([(6.0, 5.0), (6.0, 6.0), (6.05, 6.0), (6.05, 5.0)]),
     LineString([(6.0, 6.0), (7.0, 6.0), (7.0, 6.05), (6.0, 6.05)]),
-    LineString([(7.0, 5.0), (7.0, 6.0), (7.05, 6.0), (7.05, 5.0)]),
     LineString([(7.0, 6.0), (8.0, 6.0), (8.0, 6.05), (7.0, 6.05)]),
-    LineString([(8.0, 6.0), (9.0, 6.0), (9.0, 6.05), (8.0, 6.05)]),
-    LineString([(5.0, 5.0), (6.0, 5.0), (6.0, 5.05), (5.0, 5.05)]),
-    LineString([(8.0, 5.0), (9.0, 5.0), (9.0, 5.05), (8.0, 5.05)]),
+    LineString([(4.0, 5.0), (5.0, 5.0), (5.0, 5.05), (4.0, 5.05)]),
+    LineString([(7.0, 5.0), (8.0, 5.0), (8.0, 5.05), (7.0, 5.05)]),
+    LineString([(5.0, 4.0), (6.0, 4.0), (6.0, 4.05), (5.0, 4.05)]),
     LineString([(6.0, 4.0), (7.0, 4.0), (7.0, 4.05), (6.0, 4.05)]),
-    LineString([(7.0, 4.0), (8.0, 4.0), (8.0, 4.05), (7.0, 4.05)]),
-    LineString([(6.0, 4.0), (6.0, 5.0), (6.05, 5.0), (6.05, 4.0)]),
-    LineString([(8.0, 4.0), (8.0, 5.0), (8.05, 5.0), (8.05, 4.0)])
+    LineString([(5.0, 4.0), (5.0, 5.0), (5.05, 5.0), (5.05, 4.0)]),
+    LineString([(7.0, 4.0), (7.0, 5.0), (7.05, 5.0), (7.05, 4.0)])
+]
+
+# =========================
+# Line Following Lines
+# =========================
+
+LINES = [
+    LineString([(4.0, 5.5), (1.0, 5.5), (1.0, 1.0), (11.0, 1.0), (11.0, 5.5), (8.0, 5.5)]),
 ]
 
 # =========================
@@ -58,6 +66,7 @@ def cast_sonar(position, angle, walls):
         for wall in walls:
             if ray.intersects(wall):
                 pt = ray.intersection(wall)
+                # shapely sometimes returns Point or MultiPoint
                 if pt.geom_type == "Point":
                     dist = np.linalg.norm(np.array(pt.coords[0]) - position)
                     if dist < min_dist:
@@ -69,6 +78,7 @@ def cast_sonar(position, angle, walls):
                         if dist < min_dist:
                             min_dist = dist
                             hit_point = np.array(p.coords[0])
+
     noisy_dist = min_dist * (1 + np.random.normal(0, SONAR_NOISE_STD))
     return noisy_dist, hit_point, rays
 
@@ -81,18 +91,28 @@ class Rover:
     SONAR_LENGTH = 0.3
 
     def __init__(self, x, y, theta, length, width, wheel_x, wheel_y, sonar_offsets, wheel_base):
+        # Pose is the axle midpoint (center between left and right wheels)
         self.x = x
         self.y = y
         self.theta = theta
+
         self.length = length
         self.width = width
         self.wheel_base = wheel_base
-        self.wheel_offsets = np.array([[-wheel_x, wheel_y], [-wheel_x, -wheel_y]])
+
+        # --- CRITICAL: place wheels symmetrically around the axle midpoint ---
+        # left wheel at (0, +wheel_base/2), right wheel at (0, -wheel_base/2)
+        self.wheel_offsets = np.array([
+            [0.0,  wheel_base / 2.0],
+            [0.0, -wheel_base / 2.0]
+        ])
+
+        # sonar_offsets: list of [x, y, deg] relative to axle midpoint
         self.sonar_offsets = np.array(sonar_offsets)
         self.v_left = 0.0
         self.v_right = 0.0
 
-        # Precompute fixed sonar labels based on mounting angle
+        # sonar labels like previous code: map sonar angle to quadrant-ish labels
         self.sonar_labels = []
         for _, _, ang in sonar_offsets:
             ang = ang % 360
@@ -106,8 +126,9 @@ class Rover:
                 self.sonar_labels.append("sonar -Y")
 
     def rotation_matrix(self):
-        return np.array([[np.cos(self.theta), -np.sin(self.theta)],
-                         [np.sin(self.theta), np.cos(self.theta)]])
+        c = np.cos(self.theta)
+        s = np.sin(self.theta)
+        return np.array([[c, -s], [s, c]])
 
     def get_global_sonar_positions(self):
         R = self.rotation_matrix()
@@ -123,65 +144,77 @@ class Rover:
             sonar_data[label] = {"origin": sc, "distance": d, "hit": hit, "rays": rays}
         return sonar_data
 
-    # -------------------------
-    # Differential drive with rotation around wheel midpoint
-    # -------------------------
+    # =========================
+    # DIFFERENTIAL-DRIVE about axle midpoint
+    # =========================
     def update_pose(self, dt):
-        v = (self.v_left + self.v_right) / 2.0
+        v = 0.5 * (self.v_left + self.v_right)
         omega = (self.v_right - self.v_left) / self.wheel_base
 
-        if np.isclose(omega, 0.0):
-            # Straight line
-            self.x += v * np.cos(self.theta) * dt
-            self.y += v * np.sin(self.theta) * dt
-        else:
-            # Center of rotation at wheel midpoint relative to origin
-            # Assume wheels along local x-axis, symmetric along y
-            wheel_mid_local = np.array([0.0, 0.0])  # x=0 at origin (change if origin not center)
-            R = self.rotation_matrix()
-            wheel_mid_global = np.array([self.x, self.y]) + R @ wheel_mid_local
+        # integrate pose at axle midpoint
+        self.x += v * np.cos(self.theta) * dt
+        self.y += v * np.sin(self.theta) * dt
+        self.theta += omega * dt
 
-            # Instantaneous center of rotation (ICR)
-            R_icr = v / omega
-            icr_x = wheel_mid_global[0] - R_icr * np.sin(self.theta)
-            icr_y = wheel_mid_global[1] + R_icr * np.cos(self.theta)
-
-            # Update angle
-            self.theta += omega * dt
-
-            # Move origin based on rotation around wheel midpoint
-            self.x = icr_x + R_icr * np.sin(self.theta)
-            self.y = icr_y - R_icr * np.cos(self.theta)
+        # keep theta bounded
+        self.theta = (self.theta + np.pi) % (2 * np.pi) - np.pi
 
     def draw(self, ax, show_origin=False):
         R = self.rotation_matrix()
         l, w = self.length, self.width
-        body = np.array([[-l,w/2],[-l,-w/2],[0,-w/2],[0,w/2],[-l,w/2]])
+
+        # --- Center the body on the axle midpoint so rotations look correct ---
+        body = np.array([
+            [-l/2,  w/2],
+            [-l/2, -w/2],
+            [ l/2, -w/2],
+            [ l/2,  w/2],
+            [-l/2,  w/2]
+        ])
         gb = (R @ body.T).T + np.array([self.x, self.y])
-        ax.plot(gb[:,0], gb[:,1],'b-')
+        ax.plot(gb[:, 0], gb[:, 1], 'b-')
+
+        # draw sonars
         centers, angles = self.get_global_sonar_positions()
         for sc, ang in zip(centers, angles):
-            ax.plot(sc[0], sc[1],'go')
-            ax.plot([sc[0], sc[0]+Rover.SONAR_LENGTH*np.cos(ang)],
-                    [sc[1], sc[1]+Rover.SONAR_LENGTH*np.sin(ang)],'g-')
+            ax.plot(sc[0], sc[1], 'go')
+            ax.plot([sc[0], sc[0] + Rover.SONAR_LENGTH * np.cos(ang)],
+                    [sc[1], sc[1] + Rover.SONAR_LENGTH * np.sin(ang)], 'g-')
+
+        # draw wheels around axle midpoint
+        wheel_shape = np.array([
+            [-Rover.WHEEL_LENGTH/2,  Rover.WHEEL_WIDTH/2],
+            [-Rover.WHEEL_LENGTH/2, -Rover.WHEEL_WIDTH/2],
+            [ Rover.WHEEL_LENGTH/2, -Rover.WHEEL_WIDTH/2],
+            [ Rover.WHEEL_LENGTH/2,  Rover.WHEEL_WIDTH/2],
+            [-Rover.WHEEL_LENGTH/2,  Rover.WHEEL_WIDTH/2],
+        ])
+
+        for offset in self.wheel_offsets:
+            wheel_global = (R @ (wheel_shape + offset).T).T + np.array([self.x, self.y])
+            ax.plot(wheel_global[:, 0], wheel_global[:, 1], 'k-')
+
         if show_origin:
-            ax.plot(self.x, self.y,'ro')
+            ax.plot(self.x, self.y, 'ro')
 
 def draw_sonar_measurements(ax, sonar_data):
     for data in sonar_data.values():
         for ray in data["rays"]:
             x, y = ray.xy
-            ax.plot(x,y,color='green',alpha=0.15)
+            ax.plot(x, y, color='green', alpha=0.15)
         if data["hit"] is not None:
-            ax.plot(data["hit"][0], data["hit"][1],'ro')
+            ax.plot(data["hit"][0], data["hit"][1], 'ro')
 
 # =========================
 # Initialize rover
 # =========================
-rover = Rover(x=5.0, y=5.5, theta=0.0, length=0.4, width=0.4,
-              wheel_x=0.25, wheel_y=0.25,
-              sonar_offsets=[[0,0,0], [-0.2,0.2,90], [-0.2,-0.2,-90]],
-              wheel_base=0.5)
+rover = Rover(
+    x=4.0, y=5.5, theta=0.0,
+    length=0.4, width=0.4,
+    wheel_x=0.25, wheel_y=0.25,  # wheel_x/wheel_y no longer used to place wheels; kept for API compatibility
+    sonar_offsets=[[0, 0, 0], [-0.2, 0.2, 90], [-0.2, -0.2, -90]],
+    wheel_base=0.5
+)
 
 # =========================
 # FSM & Manual control
@@ -211,100 +244,82 @@ def on_key_release(event):
 # =========================
 # Animation
 # =========================
-fig, ax = plt.subplots(figsize=(12,8))
+fig, ax = plt.subplots(figsize=(12, 8))
 fig.canvas.mpl_connect('key_press_event', on_key_press)
 fig.canvas.mpl_connect('key_release_event', on_key_release)
 
 def update(frame):
-    global current_state
-    global state_time
+    global current_state, state_time
 
     state_time += DT
     sonar_data = rover.sense_sonars(WALLS)
+
+    # Read sonar distances
     sonar_x = sonar_data["sonar +X"]["distance"]
     sonar_y = sonar_data["sonar +Y"]["distance"]
     sonar__y = sonar_data["sonar -Y"]["distance"]
 
-    # ------------------------
-    # Manual override using arrow keys
-    # ------------------------
-    if not autonomous_mode:
-        rover.v_left = 0.0
-        rover.v_right = 0.0
-        if key_state["right"]:
-            rover.v_left = MAX_WHEEL_SPEED
-            rover.v_right = MAX_WHEEL_SPEED
-        if key_state["left"]:
-            rover.v_left = -MAX_WHEEL_SPEED
-            rover.v_right = -MAX_WHEEL_SPEED
-        if key_state["up"]:
-            rover.v_left = MAX_WHEEL_SPEED
-            rover.v_right = 0.0
-        if key_state["down"]:
-            rover.v_left = 0.0
-            rover.v_right = MAX_WHEEL_SPEED
-    else:
-        # ------------------------
-        # FSM Autonomous control
-        # ------------------------
-        rover.v_left = 0.0
-        rover.v_right = 0.0
+    # --------------------------
+    # State Machine
+    # --------------------------
+    rover.v_left = rover.v_right = 0.0
+    if current_state == STATE_FORWARD:
+        rover.v_left = rover.v_right = AUTO_SPEED
+        # simple wall-avoidance logic based on sonars
+        if sonar_x < 0.5 and sonar_y < 0.5 and sonar__y > 0.5:
+            state_time = 0.0
+            current_state = RIGHT_TURN
+        elif sonar_x < 0.5 and sonar__y < 0.5 and sonar_y > 0.5:
+            state_time = 0.0
+            current_state = LEFT_TURN
 
-        # ---- FSM LOGIC ----
-        if current_state == STATE_FORWARD:
-            rover.v_left = AUTO_SPEED
-            rover.v_right = AUTO_SPEED
-            if sonar_x < 0.5 and sonar_y < 0.5 and sonar__y > 0.5:
-                state_time = 0.0
-                current_state = RIGHT_TURN
-            elif sonar_x < 0.5 and sonar__y < 0.5 and sonar_y > 0.5:
-                state_time = 0.0
-                current_state = LEFT_TURN
+    elif current_state == RIGHT_TURN:
+        rover.v_left = AUTO_SPEED
+        rover.v_right = -AUTO_SPEED
+        # tuned duration to make an approx 90° turn
+        if state_time > 0.63:
+            state_time = 0.0
+            current_state = STATE_FORWARD
 
-        elif current_state == RIGHT_TURN:
-            rover.v_left = AUTO_SPEED
-            rover.v_right = -AUTO_SPEED
-            if state_time > 0.63:
-                state_time = 0.0
-                current_state = STATE_FORWARD
+    elif current_state == LEFT_TURN:
+        rover.v_left = -AUTO_SPEED
+        rover.v_right = AUTO_SPEED
+        if state_time > 0.63:
+            state_time = 0.0
+            current_state = STATE_FORWARD
 
-        elif current_state == LEFT_TURN:
-            rover.v_left = -AUTO_SPEED
-            rover.v_right = AUTO_SPEED
-            if state_time > 0.63:
-                state_time = 0.0
-                current_state = STATE_FORWARD
-        # ---- End FSM ----
-
-    # ------------------------
-    # Update rover pose
-    # ------------------------
     rover.update_pose(DT)
 
-    # ------------------------
-    # Draw world
-    # ------------------------
     ax.clear()
+    # Draw canyon walls
     for wall in WALLS:
-        x,y = wall.xy
-        ax.plot(x,y,'k',linewidth=2)
+        x, y = wall.xy
+        ax.plot(x, y, 'k', linewidth=2)
+
+    # Draw line-following path
+    for line in LINES:
+        x, y = line.xy
+        ax.plot(x, y, 'r', linewidth=2)
+
     rover.draw(ax, show_origin=True)
     draw_sonar_measurements(ax, sonar_data)
 
-    # Sonar readings (stacked vertically)
-    y_text = WORLD_Y_MAX-0.8
-    for label,data in sonar_data.items():
+    # Display sonar info
+    y_text = WORLD_Y_MAX - 0.8
+    for label, data in sonar_data.items():
         ax.text(0.2, y_text, f"{label}: {data['distance']:.2f} m")
         y_text -= 0.3
 
-    ax.text(0.2, WORLD_Y_MAX-0.2, f"Mode: {'AUTO' if autonomous_mode else 'MANUAL'}")
-    ax.text(0.2, WORLD_Y_MAX-0.5, f"State: {current_state}")
+    ax.text(0.2, WORLD_Y_MAX - 0.2, f"Mode: AUTO")
+    ax.text(0.2, WORLD_Y_MAX - 0.5, f"State: {current_state}")
     ax.text(0.2, WORLD_Y_MAX - 1.7, f"State time: {state_time:.2f} s")
+
     ax.set_xlim(WORLD_X_MIN, WORLD_X_MAX)
     ax.set_ylim(WORLD_Y_MIN, WORLD_Y_MAX)
     ax.set_aspect('equal')
     ax.grid(True)
-    ax.set_title("Full World Live Sonar Sensing + FSM + Manual Override")
+    ax.set_title("Differential Drive (Axle Midpoint = Contact) + Sonar + FSM (Autonomous Only)")
+
 
 ani = FuncAnimation(fig, update, interval=1000/SONAR_HZ, blit=False, cache_frame_data=False)
 plt.show()
